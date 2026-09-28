@@ -129,3 +129,9 @@ notebooks/
 test_video/
 snippets/
 MUJOCO_LOG.TXT
+
+# Local continual-GR00T + LIBERO environment
+/datasets/
+/outputs/
+/third_party/
+/.libero/

@@ -25,7 +25,7 @@ These scripts are used to generate the full Python commands required to run expe
 
 **Usage:**
 ```bash
-./bash_scripts/generate_train_commands.sh <TASK_SUITE_NAME> <STEPS> [CL_TYPE] [N_MEMORIES] [SAVE_STEPS] [SEED] [TUNE_LLM] [TUNE_VISION] [ADD_NAME]
+./bash_scripts/generate_train_commands.sh <TASK_SUITE_NAME> <STEPS> [CL_TYPE] [N_MEMORIES] [SAVE_STEPS] [SEED] [TUNE_LLM] [TUNE_VISION] [ADD_NAME] [BATCH_SIZE] [GRAD_ACCUMULATION_STEPS] [OPTIMIZER] [START_TASK_ID]
 ```
 
 - **Example:** `./bash_scripts/generate_train_commands.sh libero_10 10000 ER 1000 10000 42 False False s42`

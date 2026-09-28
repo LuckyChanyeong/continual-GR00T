@@ -177,10 +177,11 @@ class TrainRunner:
         self.trainer.train(resume_from_checkpoint=self.resume_from_checkpoint)
         self.trainer.save_state()
 
-        safe_save_model_for_hf_trainer(
-            trainer=self.trainer,
-            output_dir=self.training_args.output_dir,
-        )
+        if getattr(self.training_args, "save_final_model_copy", True):
+            safe_save_model_for_hf_trainer(
+                trainer=self.trainer,
+                output_dir=self.training_args.output_dir,
+            )
 
 
 class CriticTrainRunner(TrainRunner):

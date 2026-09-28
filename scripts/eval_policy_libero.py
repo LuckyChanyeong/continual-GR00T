@@ -1,3 +1,4 @@
+import atexit
 import collections
 import dataclasses
 import logging
@@ -12,6 +13,7 @@ import tyro
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from gr00t.eval.robot import RobotInferenceClient
+from gr00t.eval.foxglove_rollout import FoxgloveRollout
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
 from gr00t.model.policy import Gr00tPolicy
 from pathlib import Path
@@ -49,6 +51,14 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
+    save_video: bool = True
+
+    # Optional live Foxglove visualization and MCAP recording.
+    foxglove: bool = False
+    foxglove_host: str = "127.0.0.1"
+    foxglove_port: int = 8765
+    foxglove_mcap_path: str | None = None
+    foxglove_jpeg_quality: int = 80
 
     task_idx: int = -1  # Task index to run
 
@@ -195,6 +205,15 @@ def eval_libero(args: Args) -> None:
     )
     logging.info(f"loaded model from {args.model_path}")
 
+    foxglove_rollout = FoxgloveRollout(
+        live=args.foxglove,
+        host=args.foxglove_host,
+        port=args.foxglove_port,
+        mcap_path=args.foxglove_mcap_path,
+        jpeg_quality=args.foxglove_jpeg_quality,
+    )
+    atexit.register(foxglove_rollout.close)
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
@@ -211,7 +230,7 @@ def eval_libero(args: Args) -> None:
         #### Check if we have enough videos already ####
         task_segment = task.language.replace(" ", "_")
         existing_videos = list(pathlib.Path(args.video_out_path).glob(f"rollout_{task_segment}_*.mp4"))
-        if len(existing_videos) > 40:  # i.e., 50 or more
+        if args.save_video and len(existing_videos) >= args.num_trials_per_task:
             logging.info(
                 f"Detected {len(existing_videos)} videos for task '{task_segment}'. "
                 "Skipping evaluation for this task."
@@ -229,12 +248,12 @@ def eval_libero(args: Args) -> None:
         for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
             logging.info(f"\nTask: {task_description}")
             task_segment = task_description.replace(" ", "_")
-            if os.path.exists(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{episode_idx}_failure.mp4"):
+            if args.save_video and os.path.exists(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{episode_idx}_failure.mp4"):
                 logging.info(f"Video already exists, skipping episode {episode_idx}...")
                 total_episodes += 1
                 task_episodes += 1
                 continue
-            elif os.path.exists(
+            elif args.save_video and os.path.exists(
                 pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{episode_idx}_success.mp4"
             ):
                 logging.info(f"Video already exists, skipping episode {episode_idx}...")
@@ -251,6 +270,14 @@ def eval_libero(args: Args) -> None:
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
 
+            foxglove_rollout.start_episode(
+                task_suite=args.task_suite_name,
+                task_id=task_id,
+                actual_task_id=actual_task_idx,
+                episode_id=episode_idx,
+                task_description=task_description,
+            )
+
             # Setup
             t = 0
             replay_images = []
@@ -262,6 +289,23 @@ def eval_libero(args: Args) -> None:
                     # and we need to wait for them to fall
                     if t < args.num_steps_wait:
                         obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
+                        foxglove_rollout.publish_step(
+                            front_image=np.ascontiguousarray(obs["agentview_image"][::-1, ::-1]),
+                            wrist_image=np.ascontiguousarray(
+                                obs["robot0_eye_in_hand_image"][::-1, ::-1]
+                            ),
+                            eef_position=obs["robot0_eef_pos"],
+                            eef_quaternion=obs["robot0_eef_quat"],
+                            gripper_position=obs["robot0_gripper_qpos"],
+                            action=np.asarray(LIBERO_DUMMY_ACTION),
+                            task_id=task_id,
+                            episode_id=episode_idx,
+                            step=t,
+                            max_steps=max_steps + args.num_steps_wait,
+                            reward=reward,
+                            success=done,
+                            phase="settling",
+                        )
                         t += 1
                         continue
 
@@ -269,6 +313,9 @@ def eval_libero(args: Args) -> None:
                     # IMPORTANT: rotate 180 degrees to match train preprocessing
                     img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
                     wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                    eef_position = obs["robot0_eef_pos"].copy()
+                    eef_quaternion = obs["robot0_eef_quat"].copy()
+                    gripper_position = obs["robot0_gripper_qpos"].copy()
 
                     # No need to resize for GR00T
                     # img = image_tools.convert_to_uint8(
@@ -279,7 +326,7 @@ def eval_libero(args: Args) -> None:
                     # )
 
                     # """  # Save images for debugging
-                    if t == args.num_steps_wait and episode_idx == 0:
+                    if args.save_video and t == args.num_steps_wait and episode_idx == 0:
                         task_segment = task_description.replace(" ", "_")
                         image_prefix = pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx:02d}"
                         image_prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -288,7 +335,8 @@ def eval_libero(args: Args) -> None:
                     # """
 
                     # Save preprocessed image for replay video
-                    replay_images.append(img)
+                    if args.save_video:
+                        replay_images.append(img)
 
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk
@@ -315,12 +363,34 @@ def eval_libero(args: Args) -> None:
                         assert len(action_chunk) >= args.replan_steps, (
                             f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         )
+                        foxglove_rollout.publish_action_chunk(
+                            action_chunk,
+                            task_id=task_id,
+                            episode_id=episode_idx,
+                            step=t,
+                            replan_steps=args.replan_steps,
+                        )
                         action_plan.extend(action_chunk[: args.replan_steps])
 
                     action = action_plan.popleft()
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
+                    foxglove_rollout.publish_step(
+                        front_image=img,
+                        wrist_image=wrist_img,
+                        eef_position=eef_position,
+                        eef_quaternion=eef_quaternion,
+                        gripper_position=gripper_position,
+                        action=action,
+                        task_id=task_id,
+                        episode_id=episode_idx,
+                        step=t,
+                        max_steps=max_steps + args.num_steps_wait,
+                        reward=reward,
+                        success=done,
+                        phase="policy",
+                    )
                     if done:
                         task_successes += 1
                         total_successes += 1
@@ -335,14 +405,22 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=30,
+            foxglove_rollout.end_episode(
+                task_id=task_id,
+                episode_id=episode_idx,
+                step=t,
+                success=done,
             )
+
+            # Save a replay video of the episode
+            if args.save_video:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{episode_idx}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=30,
+                )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -370,6 +448,9 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Results saved to {result_save_path}")
     except Exception as e:
         logging.error(f"Failed to save results: {e}")
+
+    foxglove_rollout.close()
+    atexit.unregister(foxglove_rollout.close)
 
 
 def _get_libero_env(task, resolution, seed):

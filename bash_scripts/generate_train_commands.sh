@@ -8,13 +8,16 @@ TASK_SUITE_NAME=${1}
 STEPS=${2}
 CL_TYPE=${3:-"ER"} # Default to ER if not provided
 N_MEMORIES=${4:-1000} # Kept for compatibility, might not be used if EWC doesn't use replay buffer in same way, but passed to script
-BATCH_SIZE=16
 NUM_GPUS=1
 SAVE_STEPS=${5:-$STEPS}
 SEED=${6:-42}
 TUNE_LLM=${7:-"False"}
 TUNE_VISION=${8:-"False"}
 ADD_NAME=${9:-"s${SEED}"}
+BATCH_SIZE=${10:-16}
+GRAD_ACCUMULATION_STEPS=${11:-1}
+OPTIMIZER=${12:-"adamw_torch"}
+START_TASK_ID=${13:-0}
 
 # Define Task Suites
 if [ "$TASK_SUITE_NAME" == "libero_10" ]; then
@@ -199,8 +202,16 @@ fi
 
 ADD_NAME="${ADD_NAME}${tune_suffix}"
 
+batch_suffix="bs$(($BATCH_SIZE * $NUM_GPUS))"
+if [[ "$GRAD_ACCUMULATION_STEPS" -ne 1 ]]; then
+  batch_suffix="${batch_suffix}_ga${GRAD_ACCUMULATION_STEPS}"
+fi
+if [[ "$OPTIMIZER" != "adamw_torch" ]]; then
+  batch_suffix="${batch_suffix}_${OPTIMIZER}"
+fi
+
 # Updated Output Dir
-OUTPUT_DIR="${OUTPUT_PATH}/libero_cl/${TASK_SUITE_NAME}/${CL_TYPE}/step${STEPS}${mem_suffix}_bs$(($BATCH_SIZE * $NUM_GPUS))${ADD_NAME}"
+OUTPUT_DIR="${OUTPUT_PATH}/libero_cl/${TASK_SUITE_NAME}/${CL_TYPE}/step${STEPS}${mem_suffix}_${batch_suffix}${ADD_NAME}"
 
 # Construct the Command
 COMMAND="WANDB_PROJECT=gr00t-training python scripts/gr00t_sequential_finetune.py \
@@ -211,11 +222,14 @@ COMMAND="WANDB_PROJECT=gr00t-training python scripts/gr00t_sequential_finetune.p
     --data-config libero \
     --embodiment-tag libero \
     --batch-size ${BATCH_SIZE} \
+    --gradient-accumulation-steps ${GRAD_ACCUMULATION_STEPS} \
+    --optimizer ${OPTIMIZER} \
+    --start-task-id ${START_TASK_ID} \
     --cl-type ${CL_TYPE} \
     --save-steps ${SAVE_STEPS} \
     --n-memories ${N_MEMORIES} \
     --seed ${SEED} \
-    --run-name GR00T-N1.5-libero-cl_${TASK_SUITE_NAME}-${CL_TYPE}${ADD_NAME}-step${STEPS}-bs$(($BATCH_SIZE * $NUM_GPUS))${mem_suffix} \
+    --run-name GR00T-N1.5-libero-cl_${TASK_SUITE_NAME}-${CL_TYPE}${ADD_NAME}-step${STEPS}-${batch_suffix}${mem_suffix} \
     ${TUNE_LLM_FLAG} ${TUNE_VISION_FLAG}"
 
 # Print the command

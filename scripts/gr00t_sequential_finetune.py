@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+import gc
 import os
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from gr00t.model.transforms import EMBODIMENT_TAG_MAPPING, DefaultDataCollator
 from gr00t.utils.peft import get_lora_model
 from gr00t.experiment.trainer import DualBrainTrainer
 from gr00t.utils.experiment import CheckpointFormatCallback
+from gr00t.utils.optimizer_audit import AdamWStepAuditCallback
 
 
 import os, json, hashlib
@@ -58,14 +60,35 @@ class ArgsConfig:
     batch_size: int = 32
     """Batch size per GPU for training."""
 
+    gradient_accumulation_steps: int = 1
+    """Number of micro-batches accumulated before each optimizer step."""
+
+    optimizer: Literal["adamw_torch", "adamw_bnb_8bit", "paged_adamw_8bit"] = "adamw_torch"
+    """Optimizer implementation. The 8-bit variants require bitsandbytes."""
+
     max_steps: int = 10000
     """Maximum number of training steps."""
+
+    start_task_id: int = 0
+    """First task index to train. Non-zero continuation is supported for cl_type=none."""
+
+    save_final_model_copy: bool = False
+    """Also save a duplicate model in task_N after checkpoint saving."""
 
     num_gpus: int = 1
     """Number of GPUs to use for training."""
 
     save_steps: int = 1000
     """Number of steps between saving checkpoints."""
+
+    optimizer_audit: bool = False
+    """Record exact action-head AdamW updates at selected optimizer steps."""
+
+    optimizer_audit_steps: tuple[int, ...] = (1000, 5000, 7500)
+    """Optimizer steps captured when optimizer_audit is enabled."""
+
+    optimizer_audit_delta_dtype: Literal["float32", "bfloat16"] = "float32"
+    """Storage dtype for captured single-step parameter updates."""
 
     # Model parameters
     base_model_path: str = "nvidia/GR00T-N1.5-3B"
@@ -399,11 +422,11 @@ def single_task_loop(config: ArgsConfig, ewc_fisher=None, ewc_checkpoint=None):
         bf16=True,
         tf32=True,
         per_device_train_batch_size=config.batch_size,
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
         dataloader_num_workers=config.dataloader_num_workers,
         dataloader_pin_memory=False,
-        dataloader_persistent_workers=config.dataloader_num_workers > 0,
-        optim="adamw_torch",
+        dataloader_persistent_workers=False,
+        optim=config.optimizer,
         adam_beta1=0.95,
         adam_beta2=0.999,
         adam_epsilon=1e-8,
@@ -425,6 +448,9 @@ def single_task_loop(config: ArgsConfig, ewc_fisher=None, ewc_checkpoint=None):
         ddp_bucket_cap_mb=100,
         torch_compile_mode=None,
     )
+    # TrainRunner consumes this local extension. The final step checkpoint is
+    # already standalone, so the large duplicate task_N model is disabled by default.
+    training_args.save_final_model_copy = config.save_final_model_copy
 
     # ------------ ER replay loader + collator ------------
     custom_collator = None
@@ -471,6 +497,28 @@ def single_task_loop(config: ArgsConfig, ewc_fisher=None, ewc_checkpoint=None):
             training_args=training_args,
             resume_from_checkpoint=config.resume,
             data_collator=custom_collator,
+        )
+
+    if config.optimizer_audit:
+        audit_steps = tuple(sorted(set(config.optimizer_audit_steps)))
+        invalid_steps = [step for step in audit_steps if not 1 <= step <= config.max_steps]
+        if invalid_steps:
+            raise ValueError(
+                f"optimizer_audit_steps must be within [1, {config.max_steps}], "
+                f"got {invalid_steps}"
+            )
+        experiment.trainer.add_callback(
+            AdamWStepAuditCallback(
+                output_dir=Path(config.output_dir) / "optimizer_audit",
+                steps=audit_steps,
+                base_model_path=config.base_model_path,
+                delta_dtype=config.optimizer_audit_delta_dtype,
+            )
+        )
+        print(
+            f"Optimizer audit enabled at steps {audit_steps}; "
+            f"outputs: {Path(config.output_dir) / 'optimizer_audit'}",
+            flush=True,
         )
 
     # 2.3 run experiment
@@ -655,7 +703,15 @@ def main(config: ArgsConfig):
     ewc_fisher = {}
     ewc_checkpoint = {}
 
-    for task_id in range(num_tasks):
+    if not 0 <= config.start_task_id < num_tasks:
+        raise ValueError(f"start_task_id must be in [0, {num_tasks - 1}], got {config.start_task_id}")
+    if config.start_task_id > 0 and config.cl_type != "none":
+        raise ValueError(
+            "Continuing from a non-zero task currently supports only cl_type=none; "
+            "ER/EWC require reconstruction of their continual-learning state."
+        )
+
+    for task_id in range(config.start_task_id, num_tasks):
         new_config = copy.deepcopy(config)
         new_config.run_name = f"{config.run_name}_task_{'-'.join([str(i) for i in range(task_id + 1)]) if config.cl_type == 'ER' else str(task_id)}"
         new_config.dataset_path = (
@@ -663,9 +719,12 @@ def main(config: ArgsConfig):
         )
         new_config.output_dir = os.path.join(config.output_dir, f"task_{task_id}")
         if task_id > 0:
-            new_config.base_model_path = os.path.join(
+            previous_checkpoint = os.path.join(
                 config.output_dir, f"task_{task_id - 1}", f"checkpoint-{config.max_steps}"
             )
+            if not os.path.isdir(previous_checkpoint):
+                raise FileNotFoundError(f"Previous task checkpoint not found: {previous_checkpoint}")
+            new_config.base_model_path = previous_checkpoint
         
         # Pass ewc args
         new_fisher, new_params = single_task_loop(new_config, ewc_fisher=ewc_fisher, ewc_checkpoint=ewc_checkpoint)
@@ -685,6 +744,11 @@ def main(config: ArgsConfig):
                         # Assuming consistent device usage.
                         ewc_fisher[n] *= config.ewc_gamma
                         ewc_fisher[n] += new_fisher[n]
+
+        # Release Trainer/DataLoader cycles before constructing the next phase.
+        del new_config, new_fisher, new_params
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
