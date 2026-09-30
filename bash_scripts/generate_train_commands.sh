@@ -203,7 +203,7 @@ ADD_NAME="${ADD_NAME}${tune_suffix}"
 OUTPUT_DIR="${OUTPUT_PATH}/libero_cl/${TASK_SUITE_NAME}/${CL_TYPE}/step${STEPS}${mem_suffix}_bs$(($BATCH_SIZE * $NUM_GPUS))${ADD_NAME}"
 
 # Construct the Command
-COMMAND="WANDB_PROJECT=gr00t-training python scripts/gr00t_sequential_finetune.py \
+COMMAND="CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 WANDB_PROJECT=gr00t-training python scripts/gr00t_sequential_finetune.py \
     --dataset-path ${DATASET_PATHS} \
     --num-gpus ${NUM_GPUS} \
     --output-dir ${OUTPUT_DIR} \

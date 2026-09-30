@@ -1,0 +1,9 @@
+# Additional simulation/analysis tools only; preserve GR00T training dependencies.
+robosuite==1.4.0
+mujoco==2.3.7
+bddl==1.0.1
+easydict==1.9
+gym==0.25.2
+future==1.0.0
+scikit-learn==1.7.2
+seaborn==0.13.2

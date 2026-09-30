@@ -55,7 +55,7 @@ echo ""
 for task_id in $(seq 0 ${CURRENT_TASK_ID}); do
     OUTPUT_DIR="${EVAL_OUTPUT_BASE}/task_${task_id}"
     
-    CMD="mkdir -p ${OUTPUT_DIR} && python scripts/eval_policy_libero.py \
+    CMD="mkdir -p ${OUTPUT_DIR} && CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 python scripts/eval_policy_libero.py \
         --args.model-path ${CKPT_PATH} \
         --args.embodiment-tag libero \
         --args.data-config libero90 \

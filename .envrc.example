@@ -1,0 +1,61 @@
+# Example only: copy to .envrc after creating the project-local Miniconda environment.
+# Local binaries/caches are not version-controlled; see EXPERIMENT_SETUP.md.
+# Local, repository-scoped environment for the shared server.
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -n "${VIRTUAL_ENV:-}" ]] && declare -F deactivate >/dev/null; then
+    deactivate
+fi
+
+export XDG_CACHE_HOME="${PROJECT_ROOT}/.cache"
+export XDG_CONFIG_HOME="${PROJECT_ROOT}/.config"
+export CONDA_PKGS_DIRS="${PROJECT_ROOT}/.conda/pkgs"
+export CONDA_ENVS_PATH="${PROJECT_ROOT}/.conda/envs"
+export CUDA_DEVICE_ORDER="PCI_BUS_ID"
+export CUDA_VISIBLE_DEVICES="0"
+export MUJOCO_EGL_DEVICE_ID="0"
+export MUJOCO_GL="egl"
+export LIBERO_CONFIG_PATH="${PROJECT_ROOT}/.config/libero"
+export LIBERO_DATASET_PATH="${LIBERO_DATASET_PATH:-${PROJECT_ROOT}/data/libero}"
+export OUTPUT_PATH="${OUTPUT_PATH:-${PROJECT_ROOT}/output}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
+
+source "${PROJECT_ROOT}/.miniconda3/etc/profile.d/conda.sh"
+conda activate "${PROJECT_ROOT}/.conda/envs/gr00t"
+
+# User-local GL/EGL loader and matching NVIDIA vendor libraries; never system-install a driver.
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+LOCAL_NVIDIA_EGL="${PROJECT_ROOT}/third_party/nvidia-egl-595.91.07"
+if [[ -f "${LOCAL_NVIDIA_EGL}/usr/share/glvnd/egl_vendor.d/10_nvidia.json" ]]; then
+    export LD_LIBRARY_PATH="${LOCAL_NVIDIA_EGL}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+    export __EGL_VENDOR_LIBRARY_FILENAMES="${LOCAL_NVIDIA_EGL}/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+fi
+unset LOCAL_NVIDIA_EGL
+
+export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+export HF_HOME="${PROJECT_ROOT}/.cache/huggingface"
+export TORCH_HOME="${PROJECT_ROOT}/.cache/torch"
+export WANDB_DIR="${PROJECT_ROOT}/.cache/wandb"
+export PIP_CACHE_DIR="${PROJECT_ROOT}/.cache/pip"
+export TMPDIR="${PROJECT_ROOT}/.cache/tmp"
+export CUDA_CACHE_PATH="${PROJECT_ROOT}/.cache/cuda"
+export TRITON_CACHE_DIR="${PROJECT_ROOT}/.cache/triton"
+export TORCH_EXTENSIONS_DIR="${PROJECT_ROOT}/.cache/torch_extensions"
+export PYTHONNOUSERSITE=1
+export NO_ALBUMENTATIONS_UPDATE=1
+
+mkdir -p \
+    "${XDG_CACHE_HOME}" \
+    "${XDG_CONFIG_HOME}" \
+    "${CONDA_PKGS_DIRS}" \
+    "${CONDA_ENVS_PATH}" \
+    "${HF_HOME}" \
+    "${TORCH_HOME}" \
+    "${WANDB_DIR}" \
+    "${PIP_CACHE_DIR}" \
+    "${TMPDIR}" \
+    "${CUDA_CACHE_PATH}" \
+    "${TRITON_CACHE_DIR}" \
+    "${TORCH_EXTENSIONS_DIR}"
+
+unset PROJECT_ROOT

@@ -20,6 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal
 
+# This shared-server project is restricted to the assigned physical GPU 0.
+# Set the mask before importing torch so no other GPU can be initialized.
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import torch
 import tyro
 from transformers import TrainingArguments
@@ -295,6 +300,8 @@ def main(config: ArgsConfig):
 if __name__ == "__main__":
     # Parse arguments using tyro
     config = tyro.cli(ArgsConfig)
+    if config.num_gpus != 1:
+        raise ValueError("Only --num-gpus 1 is allowed on this shared server")
 
     # Print the tyro config
     print("\n" + "=" * 50)

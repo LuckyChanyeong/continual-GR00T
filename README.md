@@ -79,3 +79,8 @@ When running these scripts, ensure your `PYTHONPATH` includes the project root:
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 ```
 The scripts automatically attempt to set this when pulling configuration from `gr00t/config.py`.
+
+
+## Continual VLA analysis experiment
+
+For the frozen-VLM, 6-task spatial/goal/object analysis protocol, use [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md) and [EXPERIMENT_SETUP.md](EXPERIMENT_SETUP.md). The new manifest-based entry point is `python scripts/continual_experiment.py`; its `prepare` and `doctor` commands do not download data or train. The original commands above remain available for legacy experiments. Activate the project Miniconda environment with `source .envrc` first; all analysis runs are restricted to GPU 0.

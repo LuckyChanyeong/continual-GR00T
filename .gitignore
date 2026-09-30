@@ -37,6 +37,9 @@ pip-wheel-metadata/
 .python-version
 .idea
 .venv/
+.miniconda3/
+.conda/
+.config/
 .vscode/
 /*.iml
 pyrightconfig.json
@@ -129,3 +132,6 @@ notebooks/
 test_video/
 snippets/
 MUJOCO_LOG.TXT
+
+third_party/
+data/libero/

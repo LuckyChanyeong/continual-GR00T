@@ -1,4 +1,9 @@
 #!/bin/bash
-
-export LIBERO_DATASET_PATH="/your/path/to/libero/dataset"
-export OUTPUT_PATH="/your/path/to/experiments/output"
+export CUDA_DEVICE_ORDER="PCI_BUS_ID"
+export CUDA_VISIBLE_DEVICES="0"
+GR00T_PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export LIBERO_DATASET_PATH="${LIBERO_DATASET_PATH:-${GR00T_PROJECT_ROOT}/data/libero}"
+export OUTPUT_PATH="${OUTPUT_PATH:-${GR00T_PROJECT_ROOT}/output}"
+export MUJOCO_EGL_DEVICE_ID="0"
+export MUJOCO_GL="egl"
+unset GR00T_PROJECT_ROOT

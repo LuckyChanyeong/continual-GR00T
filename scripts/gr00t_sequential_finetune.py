@@ -21,6 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, List, Literal, Optional
 
+# This shared-server project is restricted to the assigned physical GPU 0.
+# Set the mask before importing torch so no other GPU can be initialized.
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import torch
 import tyro
 from torch.utils.data import ConcatDataset, DataLoader, RandomSampler
@@ -149,6 +154,8 @@ class ArgsConfig:
     """Decay factor for Fisher information accumulation."""
 
     seed: int = 42
+    task_order_manifest: Optional[str] = None
+    evaluate_after_phase: bool = False
 
 
 #####################################################################################
@@ -323,7 +330,7 @@ def construct_dataset(config: ArgsConfig):
     return train_dataset, replay_dataset
 
 
-def single_task_loop(config: ArgsConfig, ewc_fisher=None, ewc_checkpoint=None):
+def single_task_loop(config: ArgsConfig, ewc_fisher=None, ewc_checkpoint=None, analysis_manifest=None, phase=0):
     """Main training function."""
     data_config_cls = DATA_CONFIG_MAP[config.data_config]
     train_dataset, replay_dataset = construct_dataset(config)
@@ -473,20 +480,71 @@ def single_task_loop(config: ArgsConfig, ewc_fisher=None, ewc_checkpoint=None):
             data_collator=custom_collator,
         )
 
+    if analysis_manifest is not None:
+        from gr00t.experiment.continual_diagnostics import ContinualDiagnostics, isolated_diagnostic, seed_diagnostic
+        from gr00t.experiment.continual import fingerprint, write_json, record_prefix
+        if config.tune_llm or config.tune_visual or config.num_gpus != 1:
+            raise ValueError("Analysis requires frozen VLM and GPU 0 only")
+        diagnostic_datasets = {}
+
+        def diagnostic_batch(task, batch_index):
+            entry = next(t for t in analysis_manifest["tasks"] if t["canonical_task_id"] == task)
+            analysis_seed = int(fingerprint([analysis_manifest["suite"], task, batch_index, "diagnostic"])[:8], 16)
+            seed_diagnostic(analysis_seed)
+            if task not in diagnostic_datasets:
+                diagnostic_config = copy.deepcopy(config)
+                diagnostic_config.dataset_path = [entry["dataset_path"]]
+                diagnostic_datasets[task] = construct_dataset(diagnostic_config)[0]
+            dataset = diagnostic_datasets[task]
+            generator = torch.Generator().manual_seed(analysis_seed)
+            indices = torch.randperm(len(dataset), generator=generator)[:min(config.batch_size, len(dataset))].tolist()
+            if not indices:
+                raise ValueError("Empty diagnostic dataset")
+            seed_diagnostic(analysis_seed)
+            return DefaultDataCollator()([dataset[i] for i in indices]), analysis_seed, indices
+
+        experiment.trainer.add_callback(ContinualDiagnostics(analysis_manifest, phase, experiment.trainer, diagnostic_batch))
+
     # 2.3 run experiment
     experiment.train()
 
     current_fisher = None
     current_params = None
 
-    if config.cl_type == "EWC":
+    if config.cl_type == "EWC" or analysis_manifest is not None:
          # Compute fisher on the training dataset of the current task
          # Note: EWC typically computes fisher on the *task just finished* to protect it.
          # So we compute fisher for task_i after training task_i.
-         current_fisher = compute_fisher(experiment.trainer.model, train_dataset, device=experiment.trainer.args.device)
+         if analysis_manifest is None:
+             current_fisher = compute_fisher(experiment.trainer.model, train_dataset, device=experiment.trainer.args.device)
+         else:
+             from gr00t.experiment.continual_diagnostics import save_tensor_record
+             with isolated_diagnostic(experiment.trainer.model):
+                 fisher_config = copy.deepcopy(config)
+                 fisher_config.dataset_path = [analysis_manifest["tasks"][phase]["dataset_path"]]
+                 fisher_dataset = construct_dataset(fisher_config)[0]
+                 fisher_rng_hash = hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest()
+                 current_fisher = compute_fisher(experiment.trainer.model, fisher_dataset,
+                                                device=experiment.trainer.args.device,
+                                                num_workers=config.dataloader_num_workers)
+                 metadata = dict(estimator="legacy_batch_grad_sq", batch_size=8, shuffle=True,
+                                 seed=config.seed, rng_source="phase_end_state_after_current_dataset_construction",
+                                 cpu_rng_sha256=fisher_rng_hash,
+                                 num_batches=(len(fisher_dataset) + 7) // 8,
+                                 parameter_map=[dict(name=n, shape=list(f.shape), dtype=str(f.dtype)) for n, f in current_fisher.items()],
+                                 checkpoint=str(Path(config.output_dir) / f"checkpoint-{config.max_steps}"),
+                                 dataset_path=fisher_config.dataset_path[0], samples=len(fisher_dataset),
+                                 config_hash=analysis_manifest["config_hash"], phase=phase,
+                                 task=analysis_manifest["task_order"][phase], step=config.max_steps)
+                 path = Path(config.output_dir) / "fisher" / f"{record_prefix(analysis_manifest,phase,config.max_steps)}__ewc_fisher.pt"
+                 save_tensor_record(path, {n: f.detach().cpu().clone() for n, f in current_fisher.items()}, metadata)
+                 write_json(path.with_suffix(".json"), metadata)
          
          # Capture current parameters
-         current_params = {n: p.data.clone() for n, p in experiment.trainer.model.named_parameters() if p.requires_grad}
+         if config.cl_type == "EWC":
+             current_params = {n: p.data.clone() for n, p in experiment.trainer.model.named_parameters() if p.requires_grad}
+         else:
+             current_fisher = None
          
     return current_fisher, current_params
 
@@ -650,6 +708,30 @@ class EWCTrainRunner(TrainRunner):
 
 
 def main(config: ArgsConfig):
+    if config.num_gpus != 1:
+        raise ValueError("This project must use physical GPU 0 only")
+    analysis_manifest = None
+    if config.task_order_manifest:
+        from gr00t.experiment.continual import load_manifest, check_datasets, write_json
+        if config.tune_llm or config.tune_visual:
+            raise ValueError("Analysis requires a frozen VLM")
+        analysis_manifest = load_manifest(config.task_order_manifest)
+        check_datasets(analysis_manifest)
+        expected_paths = [t["dataset_path"] for t in analysis_manifest["tasks"]]
+        if [str(Path(p).resolve()) for p in config.dataset_path] != [str(Path(p).resolve()) for p in expected_paths]:
+            raise ValueError("Dataset paths must match the manifest order")
+        if len(expected_paths) > 6:
+            raise ValueError("Only six tasks are allowed")
+        if Path(config.output_dir).resolve() != Path(analysis_manifest["output_dir"]).resolve():
+            raise ValueError("Output directory does not match the manifest")
+        for name, expected in [("seed", analysis_manifest["seed"]), ("cl_type", analysis_manifest["method"]),
+                               ("max_steps", analysis_manifest["config"]["max_steps"]),
+                               ("batch_size", analysis_manifest["config"]["batch_size"])]:
+            if getattr(config, name) != expected:
+                raise ValueError(f"{name} does not match the manifest")
+        if config.resume:
+            raise ValueError("Whole-run resume is not implicit; use a new attempt")
+        write_json(Path(config.output_dir) / "training_args.json", vars(config))
     num_tasks = len(config.dataset_path)
     task_names = [Path(p).name for p in config.dataset_path]
     ewc_fisher = {}
@@ -662,13 +744,25 @@ def main(config: ArgsConfig):
             config.dataset_path[: task_id + 1] if config.cl_type == "ER" else [config.dataset_path[task_id]]
         )
         new_config.output_dir = os.path.join(config.output_dir, f"task_{task_id}")
+        if analysis_manifest is not None and Path(new_config.output_dir).exists():
+            raise FileExistsError(f"Refusing to overwrite phase: {new_config.output_dir}")
         if task_id > 0:
             new_config.base_model_path = os.path.join(
                 config.output_dir, f"task_{task_id - 1}", f"checkpoint-{config.max_steps}"
             )
         
         # Pass ewc args
-        new_fisher, new_params = single_task_loop(new_config, ewc_fisher=ewc_fisher, ewc_checkpoint=ewc_checkpoint)
+        new_fisher, new_params = single_task_loop(new_config, ewc_fisher=ewc_fisher, ewc_checkpoint=ewc_checkpoint,
+                                                analysis_manifest=analysis_manifest, phase=task_id)
+        if analysis_manifest is not None:
+            write_json(Path(config.output_dir) / "replay_indices.json", saved_indices)
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            if config.evaluate_after_phase:
+                subprocess.run([sys.executable, str(Path(__file__).with_name("continual_experiment.py")),
+                                "evaluate", "--manifest", config.task_order_manifest,
+                                "--phase", str(task_id), "--execute"], check=True)
         
         if config.cl_type == "EWC" and new_fisher is not None:
              print(f"Updating EWC Fisher and Checkpoint after task {task_id}")
@@ -690,6 +784,8 @@ def main(config: ArgsConfig):
 if __name__ == "__main__":
     # Parse arguments using tyro
     config = tyro.cli(ArgsConfig)
+    if config.num_gpus != 1:
+        raise ValueError("Only --num-gpus 1 is allowed; CUDA_VISIBLE_DEVICES stays 0")
 
     # Print the tyro config
     print("\n" + "=" * 50)

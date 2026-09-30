@@ -1,0 +1,20 @@
+{
+  "suites": ["libero_spatial", "libero_goal", "libero_object"],
+  "task_ids": [0, 1, 2, 3, 4, 5],
+  "order_seeds": [null, 0, 1, 2],
+  "training_seeds": [42, 43, 44],
+  "method": "ER",
+  "max_steps": 10000,
+  "batch_size": 16,
+  "n_memories": 1000,
+  "gradient_interval": 500,
+  "diagnostic_batches": 1,
+  "rollouts": 30,
+  "eval_seed": 7,
+  "save_video": false,
+  "data_config": "libero",
+  "embodiment_tag": "libero",
+  "base_model_path": "nvidia/GR00T-N1.5-3B",
+  "dataset_root": "data/libero",
+  "output_root": "output/continual_analysis"
+}
